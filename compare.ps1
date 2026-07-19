@@ -1,21 +1,20 @@
 ﻿# -*- coding: utf-8 -*-
 # ============================================================
-#  表格比对工具 v2.0.0
-#  功能: 逐列比对两个 Excel 文件，差异标红，支持关键列匹配
-# ============================================================
-
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-
-# ============================================================
-#  常量与日志
+#  表格比对工具 v5.0.0
+#  功能: 逐列比对两个 Excel 文件，差异标红，MAC/IP自动归一化
 # ============================================================
 
 $scriptDir = $PSScriptRoot
 $logDir = Join-Path $scriptDir "logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+$errLog = Join-Path $logDir ("error_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
+
+try {
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
 $logFile = Join-Path $logDir ("compare_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
-$configFile = Join-Path $scriptDir "config.json"
 
 function Write-Log($msg) {
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -53,9 +52,17 @@ function Pick-File($title, $filter) {
 }
 
 function Show-ListPicker($items, $title, $multiSelect) {
+    $itemH = 20
+    $maxVisible = 20
+    $visible = [Math]::Min($items.Count, $maxVisible)
+    $lstH = $visible * $itemH
+    $extraH = if ($multiSelect) { 50 } else { 10 }
+    $formH = $lstH + $extraH + 70
+    $formW = 660
+
     $form = New-Object System.Windows.Forms.Form
     $form.Text = $title
-    $form.Size = New-Object System.Drawing.Size(460, 380)
+    $form.Size = New-Object System.Drawing.Size($formW, $formH)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
@@ -64,13 +71,13 @@ function Show-ListPicker($items, $title, $multiSelect) {
     $lblInfo = New-Object System.Windows.Forms.Label
     $lblInfo.Text = if ($multiSelect) { "提示: 按住 Ctrl 可多选，共 $($items.Count) 项" } else { "提示: 共 $($items.Count) 项，请选择一项" }
     $lblInfo.Location = New-Object System.Drawing.Point(16, 12)
-    $lblInfo.Size = New-Object System.Drawing.Size(420, 22)
+    $lblInfo.Size = New-Object System.Drawing.Size(620, 22)
     $lblInfo.ForeColor = [System.Drawing.Color]::Gray
     $form.Controls.Add($lblInfo)
 
     $lst = New-Object System.Windows.Forms.ListBox
     $lst.Location = New-Object System.Drawing.Point(16, 38)
-    $lst.Size = New-Object System.Drawing.Size(412, 230)
+    $lst.Size = New-Object System.Drawing.Size(612, $lstH)
     $lst.IntegralHeight = $false
     $lst.BorderStyle = "FixedSingle"
     if ($multiSelect) { $lst.SelectionMode = "MultiExtended" } else { $lst.SelectionMode = "One" }
@@ -78,7 +85,7 @@ function Show-ListPicker($items, $title, $multiSelect) {
     if (-not $multiSelect -and $items.Count -gt 0) { $lst.SelectedIndex = 0 }
     $form.Controls.Add($lst)
 
-    $btnY = 282
+    $btnY = $lstH + 46
 
     if ($multiSelect) {
         $btnAll = New-Object System.Windows.Forms.Button
@@ -107,7 +114,12 @@ function Show-ListPicker($items, $title, $multiSelect) {
     $form.Controls.Add($btn)
     $form.AcceptButton = $btn
 
-    $form.CancelButton = $btn
+    $form.Add_KeyDown({
+        if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+            $form.Close()
+        }
+    })
     $form.Add_FormClosing({
         if ($form.DialogResult -ne [System.Windows.Forms.DialogResult]::OK) {
             $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
@@ -126,202 +138,281 @@ function Show-ListPicker($items, $title, $multiSelect) {
     }
 }
 
-function Show-SettingsForm($savedConfig) {
+# ============================================================
+#  手动列配对
+# ============================================================
+
+function Show-ColumnMapper($origHeaders, $copyHeaders, $origSheetName, $copySheetName) {
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "表格比对工具 — 设置"
-    $form.Size = New-Object System.Drawing.Size(420, 420)
+    $form.Text = "手动列配对 - $origSheetName vs $copySheetName"
+    $form.Size = New-Object System.Drawing.Size(780, 520)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
     $form.Font = New-Object System.Drawing.Font("Microsoft YaHei", 9)
 
-    $titleLbl = New-Object System.Windows.Forms.Label
-    $titleLbl.Text = "比对选项设置"
-    $titleLbl.Location = New-Object System.Drawing.Point(16, 12)
-    $titleLbl.Size = New-Object System.Drawing.Size(380, 24)
-    $titleLbl.Font = New-Object System.Drawing.Font("Microsoft YaHei", 11, [System.Drawing.FontStyle]::Bold)
-    $form.Controls.Add($titleLbl)
+    $lblLeft = New-Object System.Windows.Forms.Label
+    $lblLeft.Text = "原始文件列"
+    $lblLeft.Location = New-Object System.Drawing.Point(16, 12)
+    $lblLeft.Size = New-Object System.Drawing.Size(300, 20)
+    $lblLeft.Font = New-Object System.Drawing.Font("Microsoft YaHei", 9, [System.Drawing.FontStyle]::Bold)
+    $form.Controls.Add($lblLeft)
 
-    $sepLine = New-Object System.Windows.Forms.Label
-    $sepLine.BorderStyle = "Fixed3D"
-    $sepLine.Size = New-Object System.Drawing.Size(374, 2)
-    $sepLine.Location = New-Object System.Drawing.Point(16, 38)
-    $form.Controls.Add($sepLine)
+    $lstLeft = New-Object System.Windows.Forms.ListBox
+    $lstLeft.Location = New-Object System.Drawing.Point(16, 34)
+    $lstLeft.Size = New-Object System.Drawing.Size(300, 200)
+    $lstLeft.IntegralHeight = $false
+    $lstLeft.BorderStyle = "FixedSingle"
+    foreach ($h in $origHeaders) { $lstLeft.Items.Add($h.name) | Out-Null }
+    $form.Controls.Add($lstLeft)
 
-    $y = 50
+    $lblRight = New-Object System.Windows.Forms.Label
+    $lblRight.Text = "对比文件列"
+    $lblRight.Location = New-Object System.Drawing.Point(456, 12)
+    $lblRight.Size = New-Object System.Drawing.Size(300, 20)
+    $lblRight.Font = New-Object System.Drawing.Font("Microsoft YaHei", 9, [System.Drawing.FontStyle]::Bold)
+    $form.Controls.Add($lblRight)
 
-    $chkCase = New-Object System.Windows.Forms.CheckBox
-    $chkCase.Text = "忽略大小写 (A 与 a 视为相同)"
-    $chkCase.Location = New-Object System.Drawing.Point(24, $y)
-    $chkCase.Size = New-Object System.Drawing.Size(370, 22)
-    $chkCase.Checked = $savedConfig.ignoreCase
-    $form.Controls.Add($chkCase)
-    $y += 29
+    $lstRight = New-Object System.Windows.Forms.ListBox
+    $lstRight.Location = New-Object System.Drawing.Point(456, 34)
+    $lstRight.Size = New-Object System.Drawing.Size(300, 200)
+    $lstRight.IntegralHeight = $false
+    $lstRight.BorderStyle = "FixedSingle"
+    foreach ($h in $copyHeaders) { $lstRight.Items.Add($h.name) | Out-Null }
+    $form.Controls.Add($lstRight)
 
-    $chkDate = New-Object System.Windows.Forms.CheckBox
-    $chkDate.Text = "忽略日期格式差异 (2020/1/1 vs 2020-01-01)"
-    $chkDate.Location = New-Object System.Drawing.Point(24, $y)
-    $chkDate.Size = New-Object System.Drawing.Size(370, 22)
-    $chkDate.Checked = $savedConfig.ignoreDateFormat
-    $form.Controls.Add($chkDate)
-    $y += 29
+    $btnPair = New-Object System.Windows.Forms.Button
+    $btnPair.Text = "配对 >>"
+    $btnPair.Location = New-Object System.Drawing.Point(330, 100)
+    $btnPair.Size = New-Object System.Drawing.Size(100, 32)
+    $btnPair.FlatStyle = "System"
+    $form.Controls.Add($btnPair)
 
-    $lblTol = New-Object System.Windows.Forms.Label
-    $lblTol.Text = "数值容差:"
-    $lblTol.Location = New-Object System.Drawing.Point(44, $y)
-    $lblTol.Size = New-Object System.Drawing.Size(68, 24)
-    $lblTol.TextAlign = "MiddleLeft"
-    $form.Controls.Add($lblTol)
+    $lblPaired = New-Object System.Windows.Forms.Label
+    $lblPaired.Text = "已配对的列："
+    $lblPaired.Location = New-Object System.Drawing.Point(16, 248)
+    $lblPaired.Size = New-Object System.Drawing.Size(200, 20)
+    $lblPaired.Font = New-Object System.Drawing.Font("Microsoft YaHei", 9, [System.Drawing.FontStyle]::Bold)
+    $form.Controls.Add($lblPaired)
 
-    $txtTol = New-Object System.Windows.Forms.TextBox
-    $txtTol.Text = [string]$savedConfig.tolerance
-    $txtTol.Location = New-Object System.Drawing.Point(112, $y)
-    $txtTol.Size = New-Object System.Drawing.Size(80, 24)
-    $form.Controls.Add($txtTol)
+    $lstPaired = New-Object System.Windows.Forms.ListBox
+    $lstPaired.Location = New-Object System.Drawing.Point(16, 270)
+    $lstPaired.Size = New-Object System.Drawing.Size(580, 130)
+    $lstPaired.IntegralHeight = $false
+    $lstPaired.BorderStyle = "FixedSingle"
+    $form.Controls.Add($lstPaired)
 
-    $lblTolHint = New-Object System.Windows.Forms.Label
-    $lblTolHint.Text = "0=精确比对，如填 0.01 表示差在该值以内视为相同"
-    $lblTolHint.Location = New-Object System.Drawing.Point(198, $y)
-    $lblTolHint.Size = New-Object System.Drawing.Size(196, 24)
-    $lblTolHint.TextAlign = "MiddleLeft"
-    $lblTolHint.ForeColor = [System.Drawing.Color]::Gray
-    $form.Controls.Add($lblTolHint)
-    $y += 33
+    $pairedList = [System.Collections.ArrayList]::new()
 
-    $sep2 = New-Object System.Windows.Forms.Label
-    $sep2.BorderStyle = "Fixed3D"
-    $sep2.Size = New-Object System.Drawing.Size(374, 2)
-    $sep2.Location = New-Object System.Drawing.Point(16, $y)
-    $form.Controls.Add($sep2)
-    $y += 14
-    $chkExclude = New-Object System.Windows.Forms.CheckBox
-    $chkExclude.Text = "排除列模式 (选择无需比对的列，其余自动比对)"
-    $chkExclude.Location = New-Object System.Drawing.Point(24, $y)
-    $chkExclude.Size = New-Object System.Drawing.Size(370, 22)
-    $chkExclude.Checked = $savedConfig.excludeMode
-    $form.Controls.Add($chkExclude)
-    $y += 29
+    $btnPair.Add_Click({
+        if ($lstLeft.SelectedIndex -lt 0 -or $lstRight.SelectedIndex -lt 0) {
+            [System.Windows.Forms.MessageBox]::Show("请先在左右两侧各选一个列", "提示")
+            return
+        }
+        $oIdx = $lstLeft.SelectedIndex
+        $cIdx = $lstRight.SelectedIndex
+        $oName = $lstLeft.Items[$oIdx]
+        $cName = $lstRight.Items[$cIdx]
+        foreach ($p in $pairedList) {
+            if ($p.origIdx -eq $oIdx -or $p.copyIdx -eq $cIdx) {
+                [System.Windows.Forms.MessageBox]::Show("该列已配对过", "提示")
+                return
+            }
+        }
+        $pairedList.Add(@{ origIdx = $oIdx; copyIdx = $cIdx; origName = $oName; copyName = $cName }) | Out-Null
+        $lstPaired.Items.Add("$oName  <-->  $cName") | Out-Null
+    })
 
-    $chkKeyCol = New-Object System.Windows.Forms.CheckBox
-    $chkKeyCol.Text = "关键列匹配行 (按指定列值匹配，不依赖行号顺序)"
-    $chkKeyCol.Location = New-Object System.Drawing.Point(24, $y)
-    $chkKeyCol.Size = New-Object System.Drawing.Size(370, 22)
-    $chkKeyCol.Checked = $savedConfig.useKeyColumn
-    $form.Controls.Add($chkKeyCol)
-    $y += 29
+    $btnUnpair = New-Object System.Windows.Forms.Button
+    $btnUnpair.Text = "移除"
+    $btnUnpair.Location = New-Object System.Drawing.Point(610, 270)
+    $btnUnpair.Size = New-Object System.Drawing.Size(80, 32)
+    $btnUnpair.FlatStyle = "System"
+    $btnUnpair.Add_Click({
+        if ($lstPaired.SelectedIndex -ge 0) {
+            $idx = $lstPaired.SelectedIndex
+            $lstPaired.Items.RemoveAt($idx)
+            $pairedList.RemoveAt($idx)
+        }
+    })
+    $form.Controls.Add($btnUnpair)
 
-    $chkSummary = New-Object System.Windows.Forms.CheckBox
-    $chkSummary.Text = "生成差异汇总 Sheet (在结果文件中追加一个差异明细表)"
-    $chkSummary.Location = New-Object System.Drawing.Point(24, $y)
-    $chkSummary.Size = New-Object System.Drawing.Size(370, 22)
-    $chkSummary.Checked = $savedConfig.createSummary
-    $form.Controls.Add($chkSummary)
-    $y += 33
+    $btnOK = New-Object System.Windows.Forms.Button
+    $btnOK.Text = "确定"
+    $btnOK.Location = New-Object System.Drawing.Point(280, 418)
+    $btnOK.Size = New-Object System.Drawing.Size(100, 36)
+    $btnOK.FlatStyle = "System"
+    $btnOK.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $form.Controls.Add($btnOK)
+    $form.AcceptButton = $btnOK
 
-    $sep3 = New-Object System.Windows.Forms.Label
-    $sep3.BorderStyle = "Fixed3D"
-    $sep3.Size = New-Object System.Drawing.Size(374, 2)
-    $sep3.Location = New-Object System.Drawing.Point(16, $y)
-    $form.Controls.Add($sep3)
-    $y += 14
+    $form.Add_KeyDown({
+        if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+            $form.Close()
+        }
+    })
+    $form.Add_FormClosing({
+        if ($form.DialogResult -ne [System.Windows.Forms.DialogResult]::OK) {
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        }
+    })
 
-    $lblHeader = New-Object System.Windows.Forms.Label
-    $lblHeader.Text = "表头行号:"
-    $lblHeader.Location = New-Object System.Drawing.Point(24, $y)
-    $lblHeader.Size = New-Object System.Drawing.Size(72, 24)
-    $lblHeader.TextAlign = "MiddleLeft"
-    $form.Controls.Add($lblHeader)
+    $result = $form.ShowDialog()
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
 
-    $txtHeader = New-Object System.Windows.Forms.TextBox
-    $txtHeader.Text = [string]$savedConfig.headerRow
-    $txtHeader.Location = New-Object System.Drawing.Point(100, $y)
-    $txtHeader.Size = New-Object System.Drawing.Size(80, 24)
-    $form.Controls.Add($txtHeader)
-
-    $lblHdrHint = New-Object System.Windows.Forms.Label
-    $lblHdrHint.Text = "0=自动检测，其他数字=指定行号"
-    $lblHdrHint.Location = New-Object System.Drawing.Point(186, $y)
-    $lblHdrHint.Size = New-Object System.Drawing.Size(200, 24)
-    $lblHdrHint.TextAlign = "MiddleLeft"
-    $lblHdrHint.ForeColor = [System.Drawing.Color]::Gray
-    $form.Controls.Add($lblHdrHint)
-    $y += 36
-
-    $sep4 = New-Object System.Windows.Forms.Label
-    $sep4.BorderStyle = "Fixed3D"
-    $sep4.Size = New-Object System.Drawing.Size(374, 2)
-    $sep4.Location = New-Object System.Drawing.Point(16, $y)
-    $form.Controls.Add($sep4)
-    $y += 16
-
-    $btn = New-Object System.Windows.Forms.Button
-    $btn.Text = "开始比对"
-    $btn.Location = New-Object System.Drawing.Point(286, $y)
-    $btn.Size = New-Object System.Drawing.Size(104, 34)
-    $btn.FlatStyle = "System"
-    $btn.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    $form.Controls.Add($btn)
-    $form.AcceptButton = $btn
-
-    $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "取消"
-    $btnCancel.Location = New-Object System.Drawing.Point(174, $y)
-    $btnCancel.Size = New-Object System.Drawing.Size(104, 34)
-    $btnCancel.FlatStyle = "System"
-    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $form.Controls.Add($btnCancel)
-    $form.CancelButton = $btnCancel
-
-    $form.Tag = @{ chkCase = $chkCase; txtTol = $txtTol; chkDate = $chkDate; chkExclude = $chkExclude; chkKeyCol = $chkKeyCol; chkSummary = $chkSummary; txtHeader = $txtHeader }
-
-    if ($form.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
-
-    $tol = 0
-    [double]::TryParse($txtTol.Text, [ref]$tol) | Out-Null
-    $hdr = 0
-    [int]::TryParse($txtHeader.Text, [ref]$hdr) | Out-Null
-
-    return @{
-        ignoreCase = $chkCase.Checked
-        tolerance = $tol
-        ignoreDateFormat = $chkDate.Checked
-        excludeMode = $chkExclude.Checked
-        useKeyColumn = $chkKeyCol.Checked
-        createSummary = $chkSummary.Checked
-        headerRow = $hdr
+    $pairs = @()
+    foreach ($p in $pairedList) {
+        $pairs += @{
+            origIdx  = $origHeaders[$p.origIdx].index
+            copyIdx  = $copyHeaders[$p.copyIdx].index
+            origName = $origHeaders[$p.origIdx].name
+            copyName = $copyHeaders[$p.copyIdx].name
+        }
     }
+    return $pairs
 }
 
-function Load-Config {
-    $default = @{
-        ignoreCase = $false
-        tolerance = 0
-        ignoreDateFormat = $false
-        excludeMode = $false
-        useKeyColumn = $false
-        createSummary = $false
-        headerRow = 0
-    }
-    if (Test-Path $configFile) {
-        try {
-            $json = Get-Content $configFile -Raw -Encoding UTF8
-            $obj = $json | ConvertFrom-Json
-            $default.ignoreCase = [bool]$obj.ignoreCase
-            $default.tolerance = [double]$obj.tolerance
-            $default.ignoreDateFormat = [bool]$obj.ignoreDateFormat
-            $default.excludeMode = [bool]$obj.excludeMode
-            $default.useKeyColumn = [bool]$obj.useKeyColumn
-            $default.createSummary = if ($null -ne $obj.createSummary) { [bool]$obj.createSummary } else { $false }
-            $default.headerRow = [int]$obj.headerRow
-        } catch {}
-    }
-    return $default
-}
+# ============================================================
+#  Sheet 手动配对
+# ============================================================
 
-function Save-Config($cfg) {
-    try {
-        $cfg | ConvertTo-Json | Set-Content $configFile -Encoding UTF8
-    } catch {}
+function Show-SheetMapper($sheetNamesO, $sheetNamesC, $preFilled) {
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "手动配对工作表"
+    $form.Size = New-Object System.Drawing.Size(580, 480)
+    $form.StartPosition = "CenterScreen"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.MaximizeBox = $false
+    $form.Font = New-Object System.Drawing.Font("Microsoft YaHei", 9)
+
+    $lblL = New-Object System.Windows.Forms.Label
+    $lblL.Text = "原始文件 Sheet ($($sheetNamesO.Count)个)"
+    $lblL.Location = New-Object System.Drawing.Point(16, 12)
+    $lblL.Size = New-Object System.Drawing.Size(220, 20)
+    $lblL.Font = New-Object System.Drawing.Font("Microsoft YaHei", 9, [System.Drawing.FontStyle]::Bold)
+    $form.Controls.Add($lblL)
+
+    $lstL = New-Object System.Windows.Forms.ListBox
+    $lstL.Location = New-Object System.Drawing.Point(16, 34)
+    $lstL.Size = New-Object System.Drawing.Size(220, 160)
+    $lstL.IntegralHeight = $false
+    $lstL.BorderStyle = "FixedSingle"
+    foreach ($n in $sheetNamesO) { $lstL.Items.Add($n) | Out-Null }
+    $form.Controls.Add($lstL)
+
+    $lblR = New-Object System.Windows.Forms.Label
+    $lblR.Text = "对比文件 Sheet ($($sheetNamesC.Count)个)"
+    $lblR.Location = New-Object System.Drawing.Point(336, 12)
+    $lblR.Size = New-Object System.Drawing.Size(220, 20)
+    $lblR.Font = New-Object System.Drawing.Font("Microsoft YaHei", 9, [System.Drawing.FontStyle]::Bold)
+    $form.Controls.Add($lblR)
+
+    $lstR = New-Object System.Windows.Forms.ListBox
+    $lstR.Location = New-Object System.Drawing.Point(336, 34)
+    $lstR.Size = New-Object System.Drawing.Size(220, 160)
+    $lstR.IntegralHeight = $false
+    $lstR.BorderStyle = "FixedSingle"
+    foreach ($n in $sheetNamesC) { $lstR.Items.Add($n) | Out-Null }
+    $form.Controls.Add($lstR)
+
+    $btnPair = New-Object System.Windows.Forms.Button
+    $btnPair.Text = "配对 >>"
+    $btnPair.Location = New-Object System.Drawing.Point(246, 90)
+    $btnPair.Size = New-Object System.Drawing.Size(80, 30)
+    $btnPair.FlatStyle = "System"
+    $form.Controls.Add($btnPair)
+
+    $lblPaired = New-Object System.Windows.Forms.Label
+    $lblPaired.Text = "已配对："
+    $lblPaired.Location = New-Object System.Drawing.Point(16, 206)
+    $lblPaired.Size = New-Object System.Drawing.Size(200, 20)
+    $lblPaired.Font = New-Object System.Drawing.Font("Microsoft YaHei", 9, [System.Drawing.FontStyle]::Bold)
+    $form.Controls.Add($lblPaired)
+
+    $lstPaired = New-Object System.Windows.Forms.ListBox
+    $lstPaired.Location = New-Object System.Drawing.Point(16, 228)
+    $lstPaired.Size = New-Object System.Drawing.Size(440, 130)
+    $lstPaired.IntegralHeight = $false
+    $lstPaired.BorderStyle = "FixedSingle"
+    $form.Controls.Add($lstPaired)
+
+    $pairedList = [System.Collections.ArrayList]::new()
+
+    # 预填已自动配对的
+    if ($preFilled) {
+        foreach ($pf in $preFilled) {
+            $li = $sheetNamesO.IndexOf($pf.orig)
+            $ri = $sheetNamesC.IndexOf($pf.copy)
+            if ($li -ge 0 -and $ri -ge 0) {
+                $pairedList.Add(@{ leftIdx = $li; rightIdx = $ri; leftName = $pf.orig; rightName = $pf.copy }) | Out-Null
+                $lstPaired.Items.Add("$($pf.orig)  <-->  $($pf.copy)  [自动]") | Out-Null
+            }
+        }
+    }
+
+    $btnPair.Add_Click({
+        if ($lstL.SelectedIndex -lt 0 -or $lstR.SelectedIndex -lt 0) {
+            [System.Windows.Forms.MessageBox]::Show("请先在左右两侧各选一个 Sheet", "提示")
+            return
+        }
+        $li = $lstL.SelectedIndex
+        $ri = $lstR.SelectedIndex
+        $ln = $lstL.Items[$li]
+        $rn = $lstR.Items[$ri]
+        foreach ($p in $pairedList) {
+            if ($p.leftIdx -eq $li -or $p.rightIdx -eq $ri) {
+                [System.Windows.Forms.MessageBox]::Show("该 Sheet 已配对过", "提示")
+                return
+            }
+        }
+        $pairedList.Add(@{ leftIdx = $li; rightIdx = $ri; leftName = $ln; rightName = $rn }) | Out-Null
+        $lstPaired.Items.Add("$ln  <-->  $rn") | Out-Null
+    })
+
+    $btnUnpair = New-Object System.Windows.Forms.Button
+    $btnUnpair.Text = "移除"
+    $btnUnpair.Location = New-Object System.Drawing.Point(470, 228)
+    $btnUnpair.Size = New-Object System.Drawing.Size(80, 30)
+    $btnUnpair.FlatStyle = "System"
+    $btnUnpair.Add_Click({
+        if ($lstPaired.SelectedIndex -ge 0) {
+            $idx = $lstPaired.SelectedIndex
+            $lstPaired.Items.RemoveAt($idx)
+            $pairedList.RemoveAt($idx)
+        }
+    })
+    $form.Controls.Add($btnUnpair)
+
+    $btnOK = New-Object System.Windows.Forms.Button
+    $btnOK.Text = "确定"
+    $btnOK.Location = New-Object System.Drawing.Point(200, 375)
+    $btnOK.Size = New-Object System.Drawing.Size(100, 36)
+    $btnOK.FlatStyle = "System"
+    $btnOK.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $form.Controls.Add($btnOK)
+    $form.AcceptButton = $btnOK
+
+    $form.Add_KeyDown({
+        if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+            $form.Close()
+        }
+    })
+    $form.Add_FormClosing({
+        if ($form.DialogResult -ne [System.Windows.Forms.DialogResult]::OK) {
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        }
+    })
+
+    $result = $form.ShowDialog()
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+
+    $pairs = @()
+    foreach ($p in $pairedList) {
+        $pairs += @{ orig = $sheetNamesO[$p.leftIdx]; copy = $sheetNamesC[$p.rightIdx] }
+    }
+    return $pairs
 }
 
 # ============================================================
@@ -357,35 +448,46 @@ function Read-Headers($ws, $headerRow, $maxCol, $maxRow) {
 #  比对逻辑
 # ============================================================
 
-function Compare-Values($v1, $v2, $cfg) {
+function Normalize-Mac($v) {
+    $clean = $v -replace '[:\-\.\s]', ''
+    $clean = $clean.ToUpper()
+    if ($clean -match '^[0-9A-F]{12}$') {
+        return ($clean -replace '(.{2})(.{2})(.{2})(.{2})(.{2})(.{2})', '$1:$2:$3:$4:$5:$6')
+    }
+    return $v
+}
+
+function Normalize-Ip($v) {
+    $parts = $v.Split('.')
+    if ($parts.Count -eq 4) {
+        $normalized = @()
+        foreach ($p in $parts) {
+            $n = 0
+            if ([int]::TryParse($p, [ref]$n)) {
+                $normalized += $n.ToString()
+            } else {
+                return $v
+            }
+        }
+        return ($normalized -join '.')
+    }
+    return $v
+}
+
+function Compare-Values($v1, $v2) {
     $e1 = if ($v1) { $v1.Trim() } else { "" }
     $e2 = if ($v2) { $v2.Trim() } else { "" }
 
     if ($e1 -eq "" -or $e2 -eq "") { return "skip" }
 
-    if ($cfg.ignoreCase) {
-        $e1 = $e1.ToLower()
-        $e2 = $e2.ToLower()
-    }
+    $e1 = Normalize-Mac $e1
+    $e2 = Normalize-Mac $e2
 
-    if ($cfg.ignoreDateFormat) {
-        $d1 = [datetime]::MinValue
-        $d2 = [datetime]::MinValue
-        $parsed1 = [datetime]::TryParse($e1, [ref]$d1)
-        $parsed2 = [datetime]::TryParse($e2, [ref]$d2)
-        if ($parsed1 -and $parsed2) {
-            if ($d1 -eq $d2) { return "same" }
-        }
-    }
+    $e1 = Normalize-Ip $e1
+    $e2 = Normalize-Ip $e2
 
-    if ($cfg.tolerance -gt 0) {
-        $n1 = 0; $n2 = 0
-        $parsed1 = [double]::TryParse($e1, [ref]$n1)
-        $parsed2 = [double]::TryParse($e2, [ref]$n2)
-        if ($parsed1 -and $parsed2) {
-            if ([Math]::Abs($n1 - $n2) -le $cfg.tolerance) { return "same" }
-        }
-    }
+    $e1 = $e1.ToLower()
+    $e2 = $e2.ToLower()
 
     if ($e1 -ne $e2) { return "diff" }
     return "same"
@@ -395,17 +497,7 @@ function Compare-Values($v1, $v2, $cfg) {
 #  主流程
 # ============================================================
 
-Write-Log "========== 开始 v2.0.0 =========="
-
-# 加载配置
-$config = Load-Config
-
-# 设置界面
-$settings = Show-SettingsForm $config
-if ($null -eq $settings) { Write-Log "取消: 设置"; exit }
-$config = $settings
-Save-Config $config
-Write-Log "设置: 忽略大小写=$($config.ignoreCase) 容差=$($config.tolerance) 忽略日期=$($config.ignoreDateFormat) 排除模式=$($config.excludeMode) 关键列=$($config.useKeyColumn) 汇总=$($config.createSummary) 表头行=$($config.headerRow)"
+Write-Log "========== 开始 v5.0.0 =========="
 
 # 选择文件
 $filter = "Excel|*.xlsx;*.xls;*.xlsm|所有文件|*.*"
@@ -420,7 +512,8 @@ Write-Log "对比文件: $fCompare"
 $dir = [System.IO.Path]::GetDirectoryName($fCompare)
 $name = [System.IO.Path]::GetFileNameWithoutExtension($fCompare)
 $ext = [System.IO.Path]::GetExtension($fCompare)
-$copyPath = Join-Path $dir ("${name}_marked${ext}")
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$copyPath = Join-Path $dir ("${name}_比对结果_${timestamp}${ext}")
 Copy-Item $fCompare $copyPath -Force
 Write-Log "已创建副本: $copyPath"
 
@@ -441,127 +534,35 @@ $wbC.Close(0)
 Release-Excel $xl
 
 # 选择工作表
-if ($sheetNamesO.Count -gt 1) {
-    $sel = Show-ListPicker $sheetNamesO "选择原始文件的工作表" $false
-    if ($null -eq $sel) { Write-Log "取消"; exit }
-    $sheetO = $sheetNamesO[$sel[0]]
-} else {
-    $sheetO = $sheetNamesO[0]
-    Write-Log "原始文件仅一个工作表，自动选择: $sheetO"
-}
+$sheetPairs = @()
 
-if ($sheetNamesC.Count -gt 1) {
-    $sel = Show-ListPicker $sheetNamesC "选择对比文件的工作表" $false
-    if ($null -eq $sel) { Write-Log "取消"; exit }
-    $sheetC = $sheetNamesC[$sel[0]]
-} else {
-    $sheetC = $sheetNamesC[0]
-    Write-Log "对比文件仅一个工作表，自动选择: $sheetC"
-}
-
-# 读取表头
-Write-Log "正在读取表头..."
-$xl = New-ExcelEngine
-$xl.Visible = $false
-$xl.DisplayAlerts = $false
-
-$wbO = $xl.Workbooks.Open($fOriginal)
-$wsO = $wbO.Sheets($sheetO)
-$origMaxCol = 0; $origMaxRow = 0
-try { $origMaxCol = $wsO.UsedRange.Columns.Count; $origMaxRow = $wsO.UsedRange.Rows.Count } catch {}
-$origHeaderRow = if ($config.headerRow -gt 0) { $config.headerRow } else { Detect-HeaderRow $wsO $origMaxCol 10 }
-Write-Log "原始表头行: $origHeaderRow，范围: $origMaxCol 列 x $origMaxRow 行"
-$origResult = Read-Headers $wsO $origHeaderRow $origMaxCol $origMaxRow
-$origHeaders = $origResult.headers
-$origRowCount = $origResult.rowCount
-$wbO.Close(0)
-Write-Log "原始表头: $($origHeaders.Count) 个"
-
-$wbC = $xl.Workbooks.Open($copyPath)
-$wsC = $wbC.Sheets($sheetC)
-$copyMaxCol = 0; $copyMaxRow = 0
-try { $copyMaxCol = $wsC.UsedRange.Columns.Count; $copyMaxRow = $wsC.UsedRange.Rows.Count } catch {}
-$copyHeaderRow = if ($config.headerRow -gt 0) { $config.headerRow } else { Detect-HeaderRow $wsC $copyMaxCol 10 }
-Write-Log "对比表头行: $copyHeaderRow，范围: $copyMaxCol 列 x $copyMaxRow 行"
-$copyResult = Read-Headers $wsC $copyHeaderRow $copyMaxCol $copyMaxRow
-$copyHeaders = $copyResult.headers
-$copyRowCount = $copyResult.rowCount
-$wbC.Close(0)
-Write-Log "对比表头: $($copyHeaders.Count) 个"
-
-Release-Excel $xl
-
-if ($origHeaders.Count -eq 0 -or $copyHeaders.Count -eq 0) {
-    Write-Log "错误: 未找到表头"
-    [System.Windows.Forms.MessageBox]::Show("前10行中未找到表头", "错误")
-    exit 1
-}
-
-# 选择列
-$origNames = @(); foreach ($h in $origHeaders) { $origNames += $h.name }
-$copyNames = @(); foreach ($h in $copyHeaders) { $copyNames += $h.name }
-
-$modeLabel = if ($config.excludeMode) { "排除" } else { "比对" }
-$selO = Show-ListPicker $origNames "原始文件 - 选择要${modeLabel}的列（Ctrl多选）" $true
+$selO = Show-ListPicker $sheetNamesO "原始文件 - 选择要比对的工作表（Ctrl多选 / 全选）" $true
 if ($null -eq $selO) { Write-Log "取消"; exit }
+$selectedO = @(); foreach ($idx in $selO) { $selectedO += $sheetNamesO[$idx] }
 
-$selC = Show-ListPicker $copyNames "对比文件 - 选择要${modeLabel}的列（Ctrl多选）" $true
+$selC = Show-ListPicker $sheetNamesC "对比文件 - 选择要比对的工作表（Ctrl多选 / 全选）" $true
 if ($null -eq $selC) { Write-Log "取消"; exit }
+$selectedC = @(); foreach ($idx in $selC) { $selectedC += $sheetNamesC[$idx] }
 
-# 处理排除模式
-$origSelected = @()
-$copySelected = @()
-if ($config.excludeMode) {
-    for ($i = 0; $i -lt $origHeaders.Count; $i++) {
-        if ($selO -notcontains $i) { $origSelected += $i }
-    }
-    for ($i = 0; $i -lt $copyHeaders.Count; $i++) {
-        if ($selC -notcontains $i) { $copySelected += $i }
-    }
-} else {
-    $origSelected = $selO
-    $copySelected = $selC
-}
-Write-Log "原始比对列: $($origSelected.Count)，对比比对列: $($copySelected.Count)"
-
-# 按名称配对
-$pairs = @()
-foreach ($oi in $origSelected) {
-    $oField = $origHeaders[$oi].field
-    foreach ($ci in $copySelected) {
-        if ($copyHeaders[$ci].field -eq $oField) {
-            $pairs += @{ origIdx = $origHeaders[$oi].index; copyIdx = $copyHeaders[$ci].index; origName = $origHeaders[$oi].name; copyName = $copyHeaders[$ci].name }
-            break
-        }
+# 按名称自动配对
+foreach ($so in $selectedO) {
+    if ($selectedC -contains $so) {
+        $sheetPairs += @{ orig = $so; copy = $so }
     }
 }
-Write-Log "配对: $($pairs.Count) 列"
-foreach ($p in $pairs) { Write-Log "  $($p.origName) <--> $($p.copyName)" }
 
-if ($pairs.Count -eq 0) {
-    Write-Log "错误: 未找到名称相同的列"
-    [System.Windows.Forms.MessageBox]::Show("未找到名称相同的列", "错误")
-    exit 1
+Write-Log "自动配对: $($sheetPairs.Count) 个 Sheet"
+
+# 弹出手动配对，列出全部 Sheet，已自动配对的预填进去
+$sheetPairs = Show-SheetMapper $sheetNamesO $sheetNamesC $sheetPairs
+if ($null -eq $sheetPairs -or $sheetPairs.Count -eq 0) {
+    Write-Log "未配对任何 Sheet"
+    [System.Windows.Forms.MessageBox]::Show("未配对任何 Sheet，无法比对", "提示")
+    exit
 }
 
-# 关键列选择
-$keyPair = $null
-if ($config.useKeyColumn) {
-    Write-Log "请选择关键列..."
-    $keyNamesO = @(); foreach ($h in $origHeaders) { $keyNamesO += $h.name }
-    $keyNamesC = @(); foreach ($h in $copyHeaders) { $keyNamesC += $h.name }
-    $keySelO = Show-ListPicker $keyNamesO "选择原始文件的关键列（用于匹配行）" $false
-    if ($null -eq $keySelO) { Write-Log "取消"; exit }
-    $keySelC = Show-ListPicker $keyNamesC "选择对比文件的关键列（用于匹配行）" $false
-    if ($null -eq $keySelC) { Write-Log "取消"; exit }
-    $keyPair = @{
-        origIdx = $origHeaders[$keySelO[0]].index
-        copyIdx = $copyHeaders[$keySelC[0]].index
-        origName = $origHeaders[$keySelO[0]].name
-        copyName = $copyHeaders[$keySelC[0]].name
-    }
-    Write-Log "关键列: $($keyPair.origName) <--> $($keyPair.copyName)"
-}
+Write-Log "最终配对: $($sheetPairs.Count) 个 Sheet"
+foreach ($sp in $sheetPairs) { Write-Log "  $($sp.orig) <--> $($sp.copy)" }
 
 # ============================================================
 #  执行比对
@@ -573,82 +574,94 @@ $xl.Visible = $false
 $xl.DisplayAlerts = $false
 
 $wbO = $xl.Workbooks.Open($fOriginal)
-$wsO = $wbO.Sheets($sheetO)
 $wbC = $xl.Workbooks.Open($copyPath)
-$wsC = $wbC.Sheets($sheetC)
 
-$diffCells = 0
-$skipCells = 0
-$totalCells = 0
-$emptyRows = 0
-$startRow = [Math]::Max($origHeaderRow, $copyHeaderRow) + 1
+# 全局统计
+$totalDiffCells = 0
+$totalSkipCells = 0
+$totalEmptyRows = 0
+$totalAddedCount = 0
+$totalMissingCount = 0
+$allDiffSummary = @()
 
-# 差异汇总数据
-$diffSummary = @()
+foreach ($pair in $sheetPairs) {
+    $sheetO = $pair.orig
+    $sheetC = $pair.copy
+    Write-Log ""
+    Write-Log "===== 正在比对 Sheet: $sheetO ====="
 
-if ($config.useKeyColumn -and $keyPair) {
-    # ---- 关键列匹配模式 ----
-    Write-Log "模式: 关键列匹配"
+    $wsO = $wbO.Sheets($sheetO)
+    $wsC = $wbC.Sheets($sheetC)
 
-    $origKeyMap = @{}
-    for ($r = $startRow; $r -le $origRowCount; $r++) {
-        $kv = ""
-        try { $kv = $wsO.Cells($r, $keyPair.origIdx).Text } catch {}
-        if ($kv -and $kv.Trim() -ne "") { $origKeyMap[$kv.Trim()] = $r }
+    $origMaxCol = 0; $origMaxRow = 0
+    try { $origMaxCol = $wsO.UsedRange.Columns.Count; $origMaxRow = $wsO.UsedRange.Rows.Count } catch {}
+    $origHeaderRow = Detect-HeaderRow $wsO $origMaxCol 10
+    $origResult = Read-Headers $wsO $origHeaderRow $origMaxCol $origMaxRow
+    $origHeaders = $origResult.headers
+    $origRowCount = $origResult.rowCount
+    Write-Log "原始表头行: $origHeaderRow，范围: $origMaxCol 列 x $origMaxRow 行，表头: $($origHeaders.Count) 个"
+
+    $copyMaxCol = 0; $copyMaxRow = 0
+    try { $copyMaxCol = $wsC.UsedRange.Columns.Count; $copyMaxRow = $wsC.UsedRange.Rows.Count } catch {}
+    $copyHeaderRow = Detect-HeaderRow $wsC $copyMaxCol 10
+    $copyResult = Read-Headers $wsC $copyHeaderRow $copyMaxCol $copyMaxRow
+    $copyHeaders = $copyResult.headers
+    $copyRowCount = $copyResult.rowCount
+    Write-Log "对比表头行: $copyHeaderRow，范围: $copyMaxCol 列 x $copyMaxRow 行，表头: $($copyHeaders.Count) 个"
+
+    if ($origHeaders.Count -eq 0 -or $copyHeaders.Count -eq 0) {
+        Write-Log "警告: Sheet '$sheetO' 未找到表头，跳过"
+        continue
     }
 
-    $copyKeyMap = @{}
-    for ($r = $startRow; $r -le $copyRowCount; $r++) {
-        $kv = ""
-        try { $kv = $wsC.Cells($r, $keyPair.copyIdx).Text } catch {}
-        if ($kv -and $kv.Trim() -ne "") { $copyKeyMap[$kv.Trim()] = $r }
-    }
+    # 选择列
+    $origNames = @(); foreach ($h in $origHeaders) { $origNames += $h.name }
+    $copyNames = @(); foreach ($h in $copyHeaders) { $copyNames += $h.name }
 
-    # 检查对比文件每行
-    for ($r = $startRow; $r -le $copyRowCount; $r++) {
-        $ckv = ""
-        try { $ckv = $wsC.Cells($r, $keyPair.copyIdx).Text } catch {}
-        $ckv = if ($ckv) { $ckv.Trim() } else { "" }
-        if ($ckv -eq "") { $emptyRows++; continue }
+    $selO = Show-ListPicker $origNames "原始文件 [$sheetO] - 选择要比对的列（Ctrl多选）" $true
+    if ($null -eq $selO) { Write-Log "取消"; try { $wbC.Close(0) } catch {}; try { $wbO.Close(0) } catch {}; Release-Excel $xl; return }
+    $selC = Show-ListPicker $copyNames "对比文件 [$sheetC] - 选择要比对的列（Ctrl多选）" $true
+    if ($null -eq $selC) { Write-Log "取消"; try { $wbC.Close(0) } catch {}; try { $wbO.Close(0) } catch {}; Release-Excel $xl; return }
 
-        if (-not $origKeyMap.ContainsKey($ckv)) {
-            # 对比文件多出的行
-            $diffSummary += @{ type = "新增"; row = $r; key = $ckv; col = "-"; old = "-"; new = "-" }
-            continue
-        }
+    $origSelected = $selO
+    $copySelected = $selC
+    Write-Log "原始比对列: $($origSelected.Count)，对比比对列: $($copySelected.Count)"
 
-        $origRow = $origKeyMap[$ckv]
-        foreach ($p in $pairs) {
-            if ($p.origIdx -eq $keyPair.origIdx) { continue }
-            $v1 = $wsO.Cells($origRow, $p.origIdx).Text
-            $v2 = $wsC.Cells($r, $p.copyIdx).Text
-            $totalCells++
-            $result = Compare-Values $v1 $v2 $config
-            if ($result -eq "skip") { $skipCells++; continue }
-            if ($result -eq "diff") {
-                $diffCells++
-                $cell = $wsC.Cells($r, $p.copyIdx)
-                $cell.Interior.Color = 255
-                $cell.Font.Color = 16777215
-                $cell.Font.Bold = $true
-                $diffSummary += @{ type = "差异"; row = $r; key = $ckv; col = $p.origName; old = $v1; new = $v2 }
+    # 按名称自动配对
+    $pairs = @()
+    foreach ($oi in $origSelected) {
+        $oField = $origHeaders[$oi].field
+        foreach ($ci in $copySelected) {
+            if ($copyHeaders[$ci].field -eq $oField) {
+                $pairs += @{ origIdx = $origHeaders[$oi].index; copyIdx = $copyHeaders[$ci].index; origName = $origHeaders[$oi].name; copyName = $copyHeaders[$ci].name }
+                break
             }
         }
     }
+    Write-Log "自动配对: $($pairs.Count) 列"
+    foreach ($p in $pairs) { Write-Log "  $($p.origName) <--> $($p.copyName)" }
 
-    # 检查原始文件多出的行
-    foreach ($okv in $origKeyMap.Keys) {
-        if (-not $copyKeyMap.ContainsKey($okv)) {
-            $diffSummary += @{ type = "缺少"; row = $origKeyMap[$okv]; key = $okv; col = "-"; old = "-"; new = "-" }
+    # 自动配对失败时，弹出手动配对
+    if ($pairs.Count -eq 0) {
+        Write-Log "表头名称不同，进入手动配对..."
+        $pairs = Show-ColumnMapper $origHeaders $copyHeaders $sheetO $sheetC
+        if ($null -eq $pairs -or $pairs.Count -eq 0) {
+            Write-Log "手动配对为空或取消，跳过 Sheet '$sheetO'"
+            continue
         }
+        Write-Log "手动配对: $($pairs.Count) 列"
+        foreach ($p in $pairs) { Write-Log "  $($p.origName) <--> $($p.copyName)" }
     }
-} else {
-    # ---- 行号顺序模式 ----
-    Write-Log "模式: 行号顺序"
+
+    # ---- 执行比对 ----
+    $diffCells = 0
+    $skipCells = 0
+    $emptyRows = 0
+    $diffSummary = @()
+    $startRow = [Math]::Max($origHeaderRow, $copyHeaderRow) + 1
     $maxRow = [Math]::Max($origRowCount, $copyRowCount)
 
     for ($r = $startRow; $r -le $maxRow; $r++) {
-        # 检查全空行
         $allEmpty = $true
         foreach ($p in $pairs) {
             $tv1 = ""; $tv2 = ""
@@ -663,19 +676,18 @@ if ($config.useKeyColumn -and $keyPair) {
         $hasCopy = $r -le $copyRowCount
 
         if (-not $hasCopy) {
-            $diffSummary += @{ type = "缺少"; row = $r; key = $r; col = "-"; old = "-"; new = "-" }
+            $diffSummary += @{ type = "缺少"; row = $r; key = $r; col = "-"; old = "-"; new = "-"; sheet = $sheetO }
             continue
         }
         if (-not $hasOrig) {
-            $diffSummary += @{ type = "新增"; row = $r; key = $r; col = "-"; old = "-"; new = "-" }
+            $diffSummary += @{ type = "新增"; row = $r; key = $r; col = "-"; old = "-"; new = "-"; sheet = $sheetO }
             continue
         }
 
         foreach ($p in $pairs) {
             $v1 = $wsO.Cells($r, $p.origIdx).Text
             $v2 = $wsC.Cells($r, $p.copyIdx).Text
-            $totalCells++
-            $result = Compare-Values $v1 $v2 $config
+            $result = Compare-Values $v1 $v2
             if ($result -eq "skip") { $skipCells++; continue }
             if ($result -eq "diff") {
                 $diffCells++
@@ -683,55 +695,73 @@ if ($config.useKeyColumn -and $keyPair) {
                 $cell.Interior.Color = 255
                 $cell.Font.Color = 16777215
                 $cell.Font.Bold = $true
-                $diffSummary += @{ type = "差异"; row = $r; key = $r; col = $p.origName; old = $v1; new = $v2 }
+                $diffSummary += @{ type = "差异"; row = $r; key = $r; col = $p.origName; old = $v1; new = $v2; sheet = $sheetO }
             }
         }
     }
-}
 
-# ============================================================
-#  差异汇总Sheet
-# ============================================================
-
-if ($config.createSummary -and $diffSummary.Count -gt 0) {
-    Write-Log "正在生成差异汇总..."
-    $wsSummary = $wbC.Sheets.Add()
-    $wsSummary.Name = "差异汇总"
-
-    $wsSummary.Cells(1, 1).Value = "类型"
-    $wsSummary.Cells(1, 2).Value = "行号"
-    $wsSummary.Cells(1, 3).Value = "关键值"
-    $wsSummary.Cells(1, 4).Value = "列名"
-    $wsSummary.Cells(1, 5).Value = "原值"
-    $wsSummary.Cells(1, 6).Value = "对比值"
-
-    for ($i = 0; $i -lt $diffSummary.Count; $i++) {
-        $d = $diffSummary[$i]
-        $row = $i + 2
-        $wsSummary.Cells($row, 1).Value = $d.type
-        $wsSummary.Cells($row, 2).Value = $d.row
-        $wsSummary.Cells($row, 3).Value = $d.key
-        $wsSummary.Cells($row, 4).Value = $d.col
-        $wsSummary.Cells($row, 5).Value = $d.old
-        $wsSummary.Cells($row, 6).Value = $d.new
-
-        if ($d.type -eq "差异") {
-            $wsSummary.Cells($row, 1).Interior.Color = 255
-            $wsSummary.Cells($row, 1).Font.Color = 16777215
-        } elseif ($d.type -eq "新增") {
-            $wsSummary.Cells($row, 1).Interior.Color = 65280
-            $wsSummary.Cells($row, 1).Font.Color = 16777215
-        } elseif ($d.type -eq "缺少") {
-            $wsSummary.Cells($row, 1).Interior.Color = 16776960
+    # 对新增/缺少行整行标色
+    foreach ($d in $diffSummary) {
+        if ($d.type -eq "新增") {
+            for ($c = 1; $c -le $copyMaxCol; $c++) {
+                try {
+                    $cell = $wsC.Cells($d.row, $c)
+                    $cell.Interior.Color = 65280
+                    $cell.Font.Color = 16777215
+                } catch {}
+            }
+        }
+        if ($d.type -eq "缺少") {
+            for ($c = 1; $c -le $copyMaxCol; $c++) {
+                try {
+                    $cell = $wsC.Cells($d.row, $c)
+                    $cell.Interior.Color = 65535
+                    $cell.Font.Color = 0
+                } catch {}
+            }
         }
     }
 
-    $wsSummary.Columns(1).ColumnWidth = 10
-    $wsSummary.Columns(2).ColumnWidth = 8
-    $wsSummary.Columns(3).ColumnWidth = 15
-    $wsSummary.Columns(4).ColumnWidth = 20
-    $wsSummary.Columns(5).ColumnWidth = 25
-    $wsSummary.Columns(6).ColumnWidth = 25
+    # 在副本表末尾加「说明」列
+    $descCol = $copyMaxCol + 1
+    $wsC.Cells($copyHeaderRow, $descCol).Value = "说明"
+    $wsC.Cells($copyHeaderRow, $descCol).Font.Bold = $true
+
+    # 按行汇总差异说明
+    $rowDescMap = @{}
+    foreach ($d in $diffSummary) {
+        $r = $d.row
+        if (-not $rowDescMap.ContainsKey($r)) { $rowDescMap[$r] = @() }
+        $rowDescMap[$r] += $d
+    }
+    foreach ($r in $rowDescMap.Keys) {
+        $items = $rowDescMap[$r]
+        $types = @(); foreach ($item in $items) { $types += $item.type }
+        $hasDiff = $types -contains "差异"
+        $hasNew = $types -contains "新增"
+        $hasMiss = $types -contains "缺少"
+        $desc = ""
+        if ($hasDiff) {
+            $diffCols = @(); foreach ($item in $items) { if ($item.type -eq "差异") { $diffCols += $item.col } }
+            $desc = "值不同: $($diffCols -join ', ')"
+        }
+        if ($hasNew) { $desc = "对比文件多出的行" }
+        if ($hasMiss) { $desc = "原始文件多出的行" }
+        $wsC.Cells($r, $descCol).Value = $desc
+    }
+
+    $addedCount = ($diffSummary | Where-Object { $_.type -eq "新增" }).Count
+    $missingCount = ($diffSummary | Where-Object { $_.type -eq "缺少" }).Count
+
+    Write-Log "Sheet '$sheetO' 比对完成: 差异=$diffCells, 跳过空值=$skipCells, 跳过空行=$emptyRows, 新增=$addedCount, 缺少=$missingCount"
+
+    $totalDiffCells += $diffCells
+    $totalSkipCells += $skipCells
+    $totalEmptyRows += $emptyRows
+    $totalAddedCount += $addedCount
+    $totalMissingCount += $missingCount
+
+    $allDiffSummary += $diffSummary
 }
 
 # 保存
@@ -750,45 +780,76 @@ Release-Excel $xl
 #  输出结果
 # ============================================================
 
-$addedCount = ($diffSummary | Where-Object { $_.type -eq "新增" }).Count
-$missingCount = ($diffSummary | Where-Object { $_.type -eq "缺少" }).Count
-
 Write-Host ""
 Write-Host "========== 比对完成 =========="
-Write-Host "  配对列数: $($pairs.Count)"
-Write-Host "  差异单元格: $diffCells（已标红）"
-Write-Host "  跳过空值: $skipCells"
-Write-Host "  跳过空行: $emptyRows"
-Write-Host "  新增多出: $addedCount 行（标绿）"
-Write-Host "  缺少: $missingCount 行（标黄）"
+Write-Host "  比对 Sheet 数: $($sheetPairs.Count)"
+Write-Host "  差异单元格: $totalDiffCells（已标红）"
+Write-Host "  跳过空值: $totalSkipCells"
+Write-Host "  跳过空行: $totalEmptyRows"
+Write-Host "  新增多出: $totalAddedCount 行（标绿）"
+Write-Host "  缺少: $totalMissingCount 行（标黄）"
 Write-Host "  结果文件: $copyPath"
 Write-Host "  详细日志: $logFile"
 Write-Host "=============================="
 
 Write-Log "========== 结果 =========="
-Write-Log "配对列: $($pairs.Count)"
-Write-Log "差异单元格: $diffCells"
-Write-Log "跳过空值: $skipCells"
-Write-Log "跳过空行: $emptyRows"
-Write-Log "新增行: $addedCount"
-Write-Log "缺少行: $missingCount"
+Write-Log "比对 Sheet 数: $($sheetPairs.Count)"
+Write-Log "差异单元格: $totalDiffCells"
+Write-Log "跳过空值: $totalSkipCells"
+Write-Log "跳过空行: $totalEmptyRows"
+Write-Log "新增行: $totalAddedCount"
+Write-Log "缺少行: $totalMissingCount"
 Write-Log "状态: 完成"
 Write-Log "========== 结束 =========="
 
-$resultDlg = [System.Windows.Forms.MessageBox]::Show(
-    "比对完成!`n`n" +
-    "配对列数: $($pairs.Count)`n" +
-    "差异单元格: $diffCells (已标红)`n" +
-    "新增行: $addedCount (标绿)`n" +
-    "缺少行: $missingCount (标黄)`n" +
-    "跳过空值: $skipCells`n" +
-    "跳过空行: $emptyRows`n`n" +
-    "是否打开结果文件?",
-    "比对完成",
-    [System.Windows.Forms.MessageBoxButtons]::YesNo,
-    [System.Windows.Forms.MessageBoxIcon]::Information
-)
+$btnOpen = New-Object System.Windows.Forms.Button
+$btnOpen.Text = "打开结果文件"
+$btnOpen.Width = 140
+$btnOpen.Height = 35
 
-if ($resultDlg -eq [System.Windows.Forms.DialogResult]::Yes) {
-    Start-Process $copyPath
+$btnClose = New-Object System.Windows.Forms.Button
+$btnClose.Text = "关闭"
+$btnClose.Width = 100
+$btnClose.Height = 35
+
+$dlgResult = New-Object System.Windows.Forms.Form
+$dlgResult.Text = "比对完成"
+$dlgResult.Size = New-Object System.Drawing.Size(400, 180)
+$dlgResult.StartPosition = "CenterScreen"
+$dlgResult.FormBorderStyle = "FixedDialog"
+$dlgResult.MaximizeBox = $false
+$dlgResult.Font = New-Object System.Drawing.Font("Microsoft YaHei", 9)
+
+$lblResult = New-Object System.Windows.Forms.Label
+$lblResult.Text = "比对完成!`n`n" +
+    "比对 Sheet 数: $($sheetPairs.Count)`n" +
+    "差异单元格: $totalDiffCells`n" +
+    "新增行: $totalAddedCount`n" +
+    "缺少行: $totalMissingCount`n" +
+    "结果文件已标记差异并添加「说明」列"
+$lblResult.Location = New-Object System.Drawing.Point(16, 12)
+$lblResult.Size = New-Object System.Drawing.Size(360, 90)
+$dlgResult.Controls.Add($lblResult)
+
+$btnOpen.Location = New-Object System.Drawing.Point(60, 110)
+$btnClose.Location = New-Object System.Drawing.Point(230, 110)
+$dlgResult.Controls.Add($btnOpen)
+$dlgResult.Controls.Add($btnClose)
+
+$btnOpen.Add_Click({ Start-Process $copyPath; $dlgResult.Close() })
+$btnClose.Add_Click({ $dlgResult.Close() })
+
+$dlgResult.ShowDialog() | Out-Null
+
+} catch {
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $errMsg = "[$ts] $($_.Exception.Message)`n位置: 行$($_.InvocationInfo.ScriptLineNumber)`n$($_.ScriptStackTrace)"
+    try { Add-Content -Path $errLog -Value $errMsg -Encoding UTF8 } catch {}
+    try {
+        [System.Windows.Forms.MessageBox]::Show("程序出错，日志已保存到:`n$errLog`n`n$($_.Exception.Message)", "错误")
+    } catch {
+        Write-Host $errMsg
+        Write-Host "`n按任意键退出..."
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
 }

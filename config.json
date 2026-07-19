@@ -1,9 +1,0 @@
-﻿{
-    "ignoreDateFormat":  false,
-    "tolerance":  0,
-    "useKeyColumn":  false,
-    "excludeMode":  false,
-    "createSummary":  false,
-    "ignoreCase":  false,
-    "headerRow":  0
-}
